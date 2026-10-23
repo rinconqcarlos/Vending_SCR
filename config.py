@@ -1,7 +1,6 @@
 # config.py - Base de Conocimiento y Reglas de SCR Vending Bot
 import os
 
-BASE_DIR = r"G:\Mi unidad\Marketing SCR"
 EXPIRATION_TIME_SECONDS = 129600  # 36 Horas
 
 MACHINE_MAP = {
