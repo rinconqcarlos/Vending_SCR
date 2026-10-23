@@ -16,10 +16,12 @@ VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "mi_token_secreto_vending_123")
 USER_STATES = {}
 
 def clean_expired_states():
+    """Limpia sesiones vencidas EXCEPTO las que están silenciadas permanentemente."""
     current_time = time.time()
     expired = [
         phone for phone, session in USER_STATES.items() 
-        if current_time - session.get("last_active", 0) > EXPIRATION_TIME_SECONDS
+        if session.get("state") != "SILENCED_ADMIN" and 
+        (current_time - session.get("last_active", 0) > EXPIRATION_TIME_SECONDS)
     ]
     for phone in expired:
         del USER_STATES[phone]
@@ -55,7 +57,7 @@ def detect_machine_code(text):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Servidor Bot SCR Vending SAS - Flujo Flexible Activo", 200
+    return "Servidor Bot SCR Vending SAS - Silencio Permanente Administrativo Activo", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -91,6 +93,7 @@ def process_user_interaction(phone, text, msg_type):
     current_time = time.time()
     text_lower = text.lower()
 
+    # Si contiene palabras administrativas, se silencia PERMANENTEMENTE
     if any(keyword in text_lower for keyword in BYPASS_BOT_KEYWORDS):
         USER_STATES[phone] = {"state": "SILENCED_ADMIN", "last_active": current_time, "data": {}}
         send_whatsapp_message(
@@ -101,6 +104,7 @@ def process_user_interaction(phone, text, msg_type):
 
     user_session = USER_STATES.get(phone, {"state": "NEW", "last_active": current_time, "data": {}})
 
+    # Bloqueo permanente: Si el estado es SILENCED_ADMIN, el bot no responde nada
     if user_session.get("state") == "SILENCED_ADMIN":
         return
 
@@ -147,7 +151,7 @@ def process_user_interaction(phone, text, msg_type):
             display_location = f"{detected_code} - {machine_name}"
             USER_STATES[phone]["data"]["machine_code"] = detected_code
         else:
-            display_location = text  # Avanza con el texto exacto que escribió el cliente
+            display_location = text  # Permite avanzar con la descripción del usuario
             USER_STATES[phone]["data"]["machine_code"] = "NO_DETECTADO"
 
         USER_STATES[phone]["data"]["machine_name"] = display_location
@@ -181,7 +185,7 @@ def process_user_interaction(phone, text, msg_type):
             "3️⃣ Indícanos la *hora aproximada* del inconveniente y adjunta una *foto de la pantalla o del producto*."
         )
 
-    # PASO 3 Y 4: HORA, FOTO Y TELEMETRÍA DE 20 SEGUNDOS
+    # PASO 3 Y 4: HORA, FOTO Y TELEMETRÍA (20 SEGUNDOS)
     elif user_session.get("state") == "AWAITING_PHOTO_OR_TIME":
         photo_attempts = USER_STATES[phone]["data"].get("photo_attempts", 1)
 
@@ -195,7 +199,7 @@ def process_user_interaction(phone, text, msg_type):
             )
             return
 
-        # Iniciar Telemetría
+        # Avance a Telemetría
         display_loc = USER_STATES[phone]["data"].get("machine_name")
 
         send_whatsapp_message(
