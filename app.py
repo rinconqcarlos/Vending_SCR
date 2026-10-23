@@ -1,143 +1,79 @@
+# config.py - Base de Conocimiento y Reglas de SCR Vending Bot
 import os
-import requests
-from flask import Flask, request, jsonify
 
-app = Flask(__name__)
+EXPIRATION_TIME_SECONDS = 129600  # 36 Horas
 
-# Credenciales desde variables de entorno
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "mi_token_secreto_vending_123")
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
-
-# Catálogo oficial de máquinas SCR Vending SAS
-MAQUINAS_SCR = {
-    "1": {"nombre": "Edificio Central - Piso 1", "tipo": "Mixta (Snacks y Bebidas)"},
-    "2": {"nombre": "Sede Administrativa - Recepción", "tipo": "Café / Bebidas Calientes"},
-    "3": {"nombre": "Planta Operativa - Descanso", "tipo": "Snacks Refrigerados"},
-    "4": {"nombre": "Centro Logístico - Parqueadero", "tipo": "Bebidas Frías"}
+MACHINE_MAP = {
+    "A01": "Hato Grande",
+    "A02": "Parques de la Estación",
+    "A03": "Serralta",
+    "A04": "Caminos 2",
+    "A05": "El Rocío Bosque Nativo",
+    "A06": "Amazilia Tocancipá",
+    "A07": "Batará",
+    "A08": "Centro Cultural IMCTC",
+    "A09": "Altamorada",
+    "A10": "Naranjo 3",
+    "A11": "Hospital 1",
+    "A12": "U. Cundinamarca",
+    "B001": "Café",
+    "B002": "Coworking",
+    "B003": "Los Pinos",
+    "B004": "Olivo",
+    "B005": "Hospital 2",
+    "B006": "Álamo"
 }
 
-def enviar_mensaje_whatsapp(telefono_destino, texto_mensaje):
-    """Envía un mensaje de texto plano mediante la API Cloud de WhatsApp."""
-    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
-        print("ERROR: Faltan credenciales de WhatsApp.")
-        return False
+LOCATION_ALIASES = {
+    "hato grande": "A01", "hatogrande": "A01",
+    "estacion": "A02", "estación": "A02",
+    "serralta": "A03",
+    "caminos 2": "A04", "caminos ii": "A04", "caminos": "A04",
+    "rocio": "A05", "rocío": "A05", "el rocio": "A05",
+    "amazilia": "A06",
+    "batara": "A07", "batará": "A07",
+    "centro cultural": "A08", "imctc": "A08", "cultura": "A08",
+    "altamorada": "A09", "alta morada": "A09",
+    "naranjo 3": "A10", "naranjo": "A10", "naranjos": "A10",
+    "hospital 1": "A11", "hospital": "A11",
+    "u cundinamarca": "A12", "udec": "A12", "universidad": "A12",
+    "cafe": "B001", "café": "B001",
+    "coworking": "B002", "spaces": "B002",
+    "los pinos": "B003", "pinos": "B003",
+    "olivo": "B004", "los olivos": "B004",
+    "hospital 2": "B005",
+    "alamo": "B006", "álamo": "B006"
+}
 
-    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": telefono_destino,
-        "type": "text",
-        "text": {"preview_url": False, "body": texto_mensaje}
-    }
+DIAGNOSTIC_RULES = {
+    "PRODUCT_TRAPPED": [
+        "atascado", "atorado", "trancado", "colgado", "atrapado", "resorte", 
+        "espiral", "no cayo", "no salio", "bloqueado", "no despacho", "no arojo"
+    ],
+    "MONEY_RETENTION_NO_CHANGE": [
+        "se comio", "se trago", "se robo", "vueltas", "cambio", "no marca saldo", 
+        "no cuenta", "volvio a cero", "no devuelve", "retuvo", "no lee", "moneda", "billete"
+    ],
+    "DIGITAL_PAYMENT_FAILURE": [
+        "cobro digital", "descuento nequi", "pago tarjeta", "datafono", 
+        "desconto y no entrego", "transferencia sin despacho", "daviplata"
+    ],
+    "POWER_OUTAGE_OFFLINE": [
+        "sin luz", "bajon de luz", "se fue la luz", "apagada", "fuera de servicio", 
+        "sin energia", "sin senal", "pitando", "desconfigurada"
+    ]
+}
 
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        print(f"Respuesta Meta ({response.status_code}): {response.text}")
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Error al enviar mensaje: {e}")
-        return False
+BYPASS_BOT_KEYWORDS = [
+    "paca", "pacas", "coca cola", "cifrut", "masato", "factura electronica", 
+    "factura electrónica", "nit", "cedula", "cédula", "surtidor", "recorredor", 
+    "pedido", "pedidos", "entrega", "entregas", "proveedor", "sst", 
+    "autorizacion", "autorización", "placa", "comodato", "propuesta comercial", 
+    "surtilider", "surtilíder", "don carlos", "carlos", "sonia", "doña sonia", "dona sonia"
+]
 
-@app.route('/', methods=['GET'])
-def home():
-    return "Servidor Bot SCR Vending SAS - Activo", 200
-
-@app.route('/webhook', methods=['GET'])
-def verify_webhook():
-    mode = request.args.get('hub.mode')
-    token = request.args.get('hub.verify_token')
-    challenge = request.args.get('hub.challenge')
-
-    if mode == 'subscribe' and token == VERIFY_TOKEN:
-        print("WEBHOOK_VERIFIED")
-        return challenge, 200
-    return 'Forbidden', 403
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.get_json()
-
-    if data.get('object') == 'whatsapp_business_account':
-        for entry in data.get('entry', []):
-            for change in entry.get('changes', []):
-                value = change.get('value', {})
-                messages = value.get('messages', [])
-
-                if messages:
-                    msg = messages[0]
-                    telefono = msg.get('from')
-                    
-                    if msg.get('type') == 'text':
-                        texto = msg.get('text', {}).get('body', '').lower().strip()
-                        print(f"Mensaje de {telefono}: {texto}")
-
-                        # 1. Menú Principal
-                        if texto in ["hola", "buenas", "inicio", "menu", "menú", "bot"]:
-                            respuesta = (
-                                "🥤 *SCR Vending SAS - Atención de Servicio*\n\n"
-                                "¡Hola! Bienvenido al canal de soporte automático.\n"
-                                "Por favor, selecciona una opción respondiendo con el número:\n\n"
-                                "1️⃣ Reportar falla en máquina (monedas, billetes, producto atascado).\n"
-                                "2️⃣ Problema con pago electrónico (QR / Nequi / Daviplata).\n"
-                                "3️⃣ Ver listado de máquinas y ubicaciones.\n"
-                                "4️⃣ Hablar con un asesor humano."
-                            )
-
-                        # 2. Reporte de Fallas Físicas
-                        elif texto == "1" or "falla" in texto or "moneda" in texto or "producto" in texto:
-                            respuesta = (
-                                "🛠️ *Reporte de Falla Técnica*\n\n"
-                                "Lamentamos los inconvenientes. Para procesar tu reembolso o revisión:\n\n"
-                                "1. Indícanos el *Número o Ubicación de la máquina*.\n"
-                                "2. Describe brevemente el fallo (ej. 'Tragó $2.000', 'No cayó selección B3').\n\n"
-                                "Un técnico revisará el historial de la máquina de inmediato."
-                            )
-
-                        # 3. Pagos Electrónicos
-                        elif texto == "2" or "pago" in texto or "nequi" in texto or "qr" in texto:
-                            respuesta = (
-                                "💳 *Soporte de Pagos Electrónicos*\n\n"
-                                "Si realizaste una transferencia y la máquina no despachó:\n\n"
-                                "• Por favor adjunta la *foto o captura del comprobante de pago* por este chat.\n"
-                                "• Incluye el código o número de la máquina.\n\n"
-                                "Validaremos la transacción con el banco para realizar la devolución."
-                            )
-
-                        # 4. Directorio de Máquinas
-                        elif texto == "3" or "maquinas" in texto or "máquinas" in texto:
-                            lista_m = "\n".join([f"• *Máquina {k}*: {v['nombre']} ({v['tipo']})" for k, v in MAQUINAS_SCR.items()])
-                            respuesta = (
-                                f"📍 *Ubicaciones SCR Vending SAS*\n\n{lista_m}\n\n"
-                                "Si reportas un fallo en alguna de ellas, envía el número correspondiente."
-                            )
-
-                        # 5. Transferencia a Asesor
-                        elif texto == "4" or "asesor" in texto or "humano" in texto or "contacto" in texto:
-                            respuesta = (
-                                "👨‍💼 *Atención Personalizada*\n\n"
-                                "Un miembro del equipo de SCR Vending SAS responderá directamente en este chat.\n"
-                                "Horario de atención: Lunes a Sábado de 8:00 AM a 6:00 PM."
-                            )
-
-                        # 6. Respuesta por defecto
-                        else:
-                            respuesta = (
-                                "Gracias por escribir a *SCR Vending SAS*.\n\n"
-                                "Hemos recibido tu mensaje. Si se trata de una falla, indícanos la ubicación o el número de máquina. "
-                                "Si deseas ver las opciones del menú, escribe *Hola*."
-                            )
-
-                        # Enviar respuesta automática
-                        enviar_mensaje_whatsapp(telefono, respuesta)
-
-    return jsonify({"status": "success"}), 200
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+FOLLOWUP_PATTERNS = [
+    "no he recibido", "sin respuesta", "cuanto se demora", "que paso", 
+    "qué pasó", "me confirman", "consignaron", "comprobante", "reembolso", 
+    "devolucion", "devolución", "seguimiento", "ayer"
+]
