@@ -55,7 +55,7 @@ def detect_machine_code(text):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Servidor Bot SCR Vending SAS - Reglas de Negocio Activas", 200
+    return "Servidor Bot SCR Vending SAS - Flujo de Telemetría Activo", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -113,17 +113,14 @@ def process_user_interaction(phone, text, msg_type):
         USER_STATES[phone]["last_active"] = current_time
         return
 
+    # PASO 0: MENÚ INICIAL
     if user_session.get("state") == "NEW":
         if text == "1":
-            USER_STATES[phone] = {"state": "AWAITING_CLAIM_DETAILS", "last_active": current_time, "data": {}}
+            USER_STATES[phone] = {"state": "AWAITING_MACHINE", "last_active": current_time, "data": {}}
             send_whatsapp_message(
                 phone,
-                "Lamentamos el inconveniente. Para entender qué le sucedió a la máquina y darte la asistencia adecuada, por favor cuéntanos en un mensaje:\n\n"
-                "1️⃣ *¿Qué le sucedió a la máquina?* (ej. producto atascado, no dio cambio, billete retenido).\n"
-                "2️⃣ *Código o ubicación de la máquina:* (ej: A08, Centro Cultural, U. Cundinamarca, Amazilia).\n"
-                "3️⃣ *Hora aproximada* del inconveniente.\n"
-                "4️⃣ *Foto de la pantalla o producto* (opcional, si puedes tomarla nos ayuda mucho).\n\n"
-                "📌 *Nota: Atendemos únicamente novedades del día de hoy. No procesamos mensajes de audio.*"
+                "Lamentamos el inconveniente. Vamos a ayudarte a gestionarlo paso a paso 🛠️\n\n"
+                "1️⃣ Para empezar, indícanos el *código o ubicación de la máquina* (ej: A08, Centro Cultural, U. Cundinamarca, Amazilia)."
             )
         elif text == "2":
             USER_STATES[phone] = {"state": "SILENCED_ADMIN", "last_active": current_time, "data": {}}
@@ -140,39 +137,88 @@ def process_user_interaction(phone, text, msg_type):
                 "2️⃣ Proveedores, facturación o gestión administrativa."
             )
 
-    elif user_session.get("state") == "AWAITING_CLAIM_DETAILS":
+    # PASO 1: CAPTURA DE MÁQUINA
+    elif user_session.get("state") == "AWAITING_MACHINE":
         detected_code = detect_machine_code(text)
         if not detected_code:
             send_whatsapp_message(
                 phone,
-                "Gracias por la explicación. Para poder registrar el reporte técnico, por favor indícanos el *código de la máquina* (ej: A01, A08, B001) o el *nombre del lugar/edificio* donde se encuentra ubicada."
+                "Para registrar la novedad, por favor indícanos el *código de la máquina* (ej: A01, A08, B001) o el *nombre del lugar/edificio* donde se encuentra ubicada."
             )
             return
 
+        machine_name = MACHINE_MAP.get(detected_code, "Ubicación registrada")
+        USER_STATES[phone]["data"]["machine_code"] = detected_code
+        USER_STATES[phone]["data"]["machine_name"] = machine_name
+        USER_STATES[phone]["state"] = "AWAITING_FAULT_DESCRIPTION"
+        USER_STATES[phone]["last_active"] = current_time
+
+        send_whatsapp_message(
+            phone,
+            f"Ubicación registrada para la máquina *{detected_code} - {machine_name}* 📍\n\n"
+            "2️⃣ Cuéntanos explícitamente *¿qué le sucedió a la máquina?* (ej: producto atascado, no dio cambio, dinero retenido, cobro digital sin despacho).\n\n"
+            "📌 *Nota: Atendemos únicamente novedades del día de hoy. No procesamos mensajes de audio.*"
+        )
+
+    # PASO 2: CAPTURA DE NOVEDAD EXPLÍCITA
+    elif user_session.get("state") == "AWAITING_FAULT_DESCRIPTION":
         detected_fault = "DESCONOCIDO"
         for fault_type, keywords in DIAGNOSTIC_RULES.items():
             if any(kw in text_lower for kw in keywords):
                 detected_fault = fault_type
                 break
 
-        machine_name = MACHINE_MAP.get(detected_code, "Ubicación registrada")
-
-        USER_STATES[phone]["data"]["machine_code"] = detected_code
-        USER_STATES[phone]["data"]["machine_name"] = machine_name
         USER_STATES[phone]["data"]["fault_type"] = detected_fault
         USER_STATES[phone]["data"]["claim_text"] = text
-        USER_STATES[phone]["state"] = "AWAITING_NEQUI"
+        USER_STATES[phone]["data"]["photo_attempts"] = 1
+        USER_STATES[phone]["state"] = "AWAITING_PHOTO_OR_TIME"
         USER_STATES[phone]["last_active"] = current_time
 
         send_whatsapp_message(
             phone,
-            f"Entendido. Hemos registrado tu reporte para la máquina *{detected_code} - {machine_name}* 🛠️\n\n"
-            "Por favor compártenos tu *número de Nequi* (o el de un familiar/conocido) para procesar tu devolución.\n\n"
-            "📌 *Ten en cuenta: La devolución se realizará en el transcurso del día y te enviaremos la foto del comprobante por este mismo chat tan pronto sea ejecutada. 😉*"
+            "Registro tomado 📝\n\n"
+            "3️⃣ Indícanos la *hora aproximada* del inconveniente y adjunta una *foto de la pantalla o del producto*."
         )
 
-    elif user_session.get("state") == "AWAITING_NEQUI":
-        USER_STATES[phone]["data"]["nequi"] = text
+    # PASO 3 Y 4: HORA, FOTO Y TELEMETRÍA DE 20 SEGUNDOS
+    elif user_session.get("state") == "AWAITING_PHOTO_OR_TIME":
+        photo_attempts = USER_STATES[phone]["data"].get("photo_attempts", 1)
+
+        # Si no envía foto en el primer intento
+        if msg_type not in ["image", "document"] and photo_attempts == 1:
+            USER_STATES[phone]["data"]["photo_attempts"] = 2
+            USER_STATES[phone]["last_active"] = current_time
+            send_whatsapp_message(
+                phone,
+                "Para validar con precisión el estado del resorte o la pantalla, por favor *envíanos una foto clara* de la máquina o del producto."
+            )
+            return
+
+        # Si envía foto O cumple el 2.º intento: Iniciar Telemetría
+        code = USER_STATES[phone]["data"].get("machine_code")
+        name = USER_STATES[phone]["data"].get("machine_name")
+
+        send_whatsapp_message(
+            phone,
+            f"Entendido. Hemos registrado tu reporte para la máquina *{code} - {name}* 🛠️\n\n"
+            "Vamos a validar la información suministrada con la telemetría de la máquina. Danos unos segundos..."
+        )
+
+        # Pausa de 20 segundos simulando lectura del sistema
+        time.sleep(20)
+
+        USER_STATES[phone]["state"] = "AWAITING_NEQUI_AND_AMOUNT"
+        USER_STATES[phone]["last_active"] = time.time()
+
+        send_whatsapp_message(
+            phone,
+            "✅ *Novedad preaprobada*\n\n"
+            "Por favor compártenos el *valor ($) exacto que te debemos* y tu *número de Nequi* (o el de un familiar/conocido) en un solo mensaje para procesar tu devolución."
+        )
+
+    # PASO 5: REGISTRO DE VALOR + NEQUI Y CIERRE
+    elif user_session.get("state") == "AWAITING_NEQUI_AND_AMOUNT":
+        USER_STATES[phone]["data"]["refund_details"] = text
         USER_STATES[phone]["state"] = "WAITING_REFUND"
         USER_STATES[phone]["last_active"] = current_time
 
