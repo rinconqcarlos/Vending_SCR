@@ -3,6 +3,7 @@ import re
 import hmac
 import hashlib
 import json
+import time
 import requests
 from flask import Flask, request, jsonify
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +29,12 @@ r = Redis(url=redis_url, token=redis_token) if redis_url and redis_token else No
 # Pool de hilos para procesamiento asíncrono
 executor = ThreadPoolExecutor(max_workers=5)
 
+# Tiempo de ventana activa: 36 horas en segundos (36 * 3600 = 129600)
+WINDOW_36_HOURS_SECONDS = 129600
+
+# Palabras de cortesía/cierre que el bot debe ignorar
+GRATITUDE_KEYWORDS = ["gracias", "mil gracias", "ok", "listo", "dale", "perfecto", "bueno", "excelente", "muchas gracias"]
+
 def verify_signature(payload, signature):
     """Valida la firma X-Hub-Signature-256 para seguridad."""
     if not APP_SECRET or not signature:
@@ -38,17 +45,20 @@ def verify_signature(payload, signature):
     return hmac.compare_digest(signature, expected_sig)
 
 def get_session(phone):
-    """Obtiene la sesión del usuario desde Redis."""
+    """Obtiene la sesión del usuario desde Redis con control de tiempo."""
     if not r:
-        return {"state": "NEW", "data": {}}
+        return {"state": "NEW", "data": {}, "last_interaction": 0}
     raw = r.get(f"session:{phone}")
-    return json.loads(raw) if raw else {"state": "NEW", "data": {}}
+    if raw:
+        return json.loads(raw)
+    return {"state": "NEW", "data": {}, "last_interaction": 0}
 
-def save_session(phone, session, ttl=172800):
-    """Guarda la sesión en Redis con tiempo de vida (TTL por defecto: 48h)."""
+def save_session(phone, session, ttl=WINDOW_36_HOURS_SECONDS):
+    """Guarda la sesión actualizando el timestamp de la última interacción."""
+    session["last_interaction"] = time.time()
     if r:
         if session.get("state") == "SILENCED_ADMIN":
-            ttl = 2592000  # 30 días para silenciados administrativamente
+            ttl = 2592000  # 30 días para contactos administrativos
         r.set(f"session:{phone}", json.dumps(session), ex=ttl)
 
 def is_duplicate_message(msg_id):
@@ -58,7 +68,7 @@ def is_duplicate_message(msg_id):
     return not r.set(f"msg:{msg_id}", "1", nx=True, ex=86400)
 
 def send_whatsapp_message(to_phone, text_message):
-    """Envía mensaje vía WhatsApp Cloud API con timeout configurado."""
+    """Envía mensaje vía WhatsApp Cloud API."""
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
@@ -89,7 +99,7 @@ def detect_machine_code(text):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Servidor Bot SCR Vending SAS - Arquitectura Redis & Asíncrona Activa", 200
+    return "Servidor Bot SCR Vending SAS - Regla de 36 Horas Activa", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -106,13 +116,10 @@ def receive_message():
         return "Firma no válida", 403
 
     data = request.get_json()
-
-    # Procesamiento asíncrono en segundo plano e independientemente del return
     executor.submit(async_process_webhook, data)
     return jsonify({"status": "received"}), 200
 
 def async_process_webhook(data):
-    """Procesa las novedades de Meta en segundo plano."""
     try:
         entries = data.get("entry", [])
         for entry in entries:
@@ -125,7 +132,6 @@ def async_process_webhook(data):
                     msg_id = message_data.get("id")
                     
                     if is_duplicate_message(msg_id):
-                        print(f"Mensaje duplicado omitido: {msg_id}")
                         continue
 
                     from_phone = message_data.get("from")
@@ -141,13 +147,30 @@ def async_process_webhook(data):
 
                     process_user_interaction(from_phone, incoming_text, msg_type)
     except Exception as e:
-        print(f"Error procesando webhook asíncrono: {e}")
+        print(f"Error procesando webhook: {e}")
 
 def process_user_interaction(phone, text, msg_type):
     text_lower = text.lower()
     session = get_session(phone)
+    current_time = time.time()
+    last_interaction = session.get("last_interaction", 0)
 
-    # Evaluación con expresiones regulares (palabras completas con \b)
+    # REGLA DE LAS 36 HORAS:
+    # Si han pasado menos de 36 horas desde la última interacción y el estado es COMPLETED, el bot permanece en silencio
+    time_elapsed = current_time - last_interaction
+    if session.get("state") == "COMPLETED" and time_elapsed < WINDOW_36_HOURS_SECONDS:
+        # No responde nada para permitir el diálogo libre con la empresa sin reiniciar el menú
+        save_session(phone, session)
+        return
+
+    # Si el cliente responde agradeciendo durante o después del proceso
+    if any(kw in text_lower for kw in GRATITUDE_KEYWORDS):
+        if session.get("state") in ["WAITING_REFUND", "UNDER_REVIEW", "COMPLETED"]:
+            session["state"] = "COMPLETED"
+            save_session(phone, session)
+            return
+
+    # Evaluación de palabras administrativas con regex
     is_admin_keyword = False
     for kw in BYPASS_BOT_KEYWORDS:
         pattern = r'\b' + re.escape(kw.lower()) + r'\b'
@@ -167,7 +190,9 @@ def process_user_interaction(phone, text, msg_type):
     if session.get("state") == "SILENCED_ADMIN":
         return
 
+    # Si el usuario sigue esperando su comprobante
     if session.get("state") in ["WAITING_REFUND", "UNDER_REVIEW"]:
+        save_session(phone, session)
         send_whatsapp_message(
             phone,
             "Hola de nuevo. Tu reporte sigue en proceso de gestión. "
@@ -176,7 +201,8 @@ def process_user_interaction(phone, text, msg_type):
         return
 
     # --- PASO 0: MENÚ INICIAL ---
-    if session.get("state") == "NEW":
+    if session.get("state") in ["NEW", "COMPLETED"]:
+        # Solo muestra el menú de bienvenida si seleccionó 1, 2 o si es un inicio limpio tras vencer las 36 horas
         if text == "1":
             session = {"state": "AWAITING_MACHINE", "data": {}}
             save_session(phone, session)
@@ -194,6 +220,8 @@ def process_user_interaction(phone, text, msg_type):
                 "Gracias por comunicarte con el área administrativa de SCR Vending. Tu mensaje ha sido canalizado con el equipo encargado."
             )
         else:
+            session["state"] = "NEW"
+            save_session(phone, session)
             send_whatsapp_message(
                 phone,
                 "¡Hola! Bienvenido al canal de atención de *SCR Vending* 🤖\n\n"
