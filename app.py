@@ -4,23 +4,23 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Configuración de variables de entorno
+# Credenciales desde variables de entorno
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "mi_token_secreto_vending_123")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 
-# Catálogo de soporte básico para SCR Vending SAS
-RESPUESTAS_AUTOMATICAS = {
-    "moneda": "Si la máquina se tragó una moneda o billete, por favor indícanos el número de máquina y la ubicación para procesar la devolución.",
-    "producto": "Si el producto no cayó pero se realizó el cobro, indícanos la selección (ej. A1) y el nombre de la máquina.",
-    "pago": "Para problemas con pago QR / Nequi / Daviplata, por favor envíanos el comprobante de transferencia por este medio.",
-    "contacto": "Un asesor de SCR Vending SAS revisará tu mensaje a la brevedad. Horario de atención: Lunes a Sábado de 8:00 AM a 6:00 PM."
+# Catálogo oficial de máquinas SCR Vending SAS
+MAQUINAS_SCR = {
+    "1": {"nombre": "Edificio Central - Piso 1", "tipo": "Mixta (Snacks y Bebidas)"},
+    "2": {"nombre": "Sede Administrativa - Recepción", "tipo": "Café / Bebidas Calientes"},
+    "3": {"nombre": "Planta Operativa - Descanso", "tipo": "Snacks Refrigerados"},
+    "4": {"nombre": "Centro Logístico - Parqueadero", "tipo": "Bebidas Frías"}
 }
 
 def enviar_mensaje_whatsapp(telefono_destino, texto_mensaje):
-    """Envía un mensaje de texto a través de la Cloud API de WhatsApp."""
+    """Envía un mensaje de texto plano mediante la API Cloud de WhatsApp."""
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
-        print("ERROR: Faltan credenciales de WhatsApp (WHATSAPP_TOKEN o PHONE_NUMBER_ID).")
+        print("ERROR: Faltan credenciales de WhatsApp.")
         return False
 
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
@@ -36,9 +36,13 @@ def enviar_mensaje_whatsapp(telefono_destino, texto_mensaje):
         "text": {"preview_url": False, "body": texto_mensaje}
     }
 
-    response = requests.post(url, json=payload, headers=headers)
-    print(f"Respuesta envío WhatsApp: {response.status_code} - {response.text}")
-    return response.status_code == 200
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        print(f"Respuesta Meta ({response.status_code}): {response.text}")
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Error al enviar mensaje: {e}")
+        return False
 
 @app.route('/', methods=['GET'])
 def home():
@@ -51,10 +55,9 @@ def verify_webhook():
     challenge = request.args.get('hub.challenge')
 
     if mode == 'subscribe' and token == VERIFY_TOKEN:
-        print("WEBHOOK_VERIFIED EN SERVIDOR")
+        print("WEBHOOK_VERIFIED")
         return challenge, 200
-    else:
-        return 'Forbidden', 403
+    return 'Forbidden', 403
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -68,38 +71,70 @@ def webhook():
 
                 if messages:
                     msg = messages[0]
-                    telefono_remitente = msg.get('from')
+                    telefono = msg.get('from')
                     
                     if msg.get('type') == 'text':
-                        texto_recibido = msg.get('text', {}).get('body', '').lower()
-                        print(f"Mensaje entrante de {telefono_remitente}: {texto_recibido}")
+                        texto = msg.get('text', {}).get('body', '').lower().strip()
+                        print(f"Mensaje de {telefono}: {texto}")
 
-                        # Lógica de respuesta automática según palabras clave
-                        if "hola" in texto_recibido or "inicio" in texto_recibido or "menu" in texto_recibido:
+                        # 1. Menú Principal
+                        if texto in ["hola", "buenas", "inicio", "menu", "menú", "bot"]:
                             respuesta = (
-                                "🤖 *SCR Vending SAS - Soporte Automatizado*\n\n"
-                                "¡Hola! ¿En qué podemos ayudarte hoy?\n\n"
-                                "1️⃣ Escribe *moneda* si tuviste problemas con monedas/billetes.\n"
-                                "2️⃣ Escribe *producto* si no cayó tu selección.\n"
-                                "3️⃣ Escribe *pago* si tuviste inconvenientes con pago electrónico.\n"
-                                "4️⃣ Escribe *contacto* para hablar con un agente humano."
+                                "🥤 *SCR Vending SAS - Atención de Servicio*\n\n"
+                                "¡Hola! Bienvenido al canal de soporte automático.\n"
+                                "Por favor, selecciona una opción respondiendo con el número:\n\n"
+                                "1️⃣ Reportar falla en máquina (monedas, billetes, producto atascado).\n"
+                                "2️⃣ Problema con pago electrónico (QR / Nequi / Daviplata).\n"
+                                "3️⃣ Ver listado de máquinas y ubicaciones.\n"
+                                "4️⃣ Hablar con un asesor humano."
                             )
-                        elif "moneda" in texto_recibido or "billete" in texto_recibido or "1" == texto_recibido.strip():
-                            respuesta = RESPUESTAS_AUTOMATICAS["moneda"]
-                        elif "producto" in texto_recibido or "2" == texto_recibido.strip():
-                            respuesta = RESPUESTAS_AUTOMATICAS["producto"]
-                        elif "pago" in texto_recibido or "qr" in texto_recibido or "3" == texto_recibido.strip():
-                            respuesta = RESPUESTAS_AUTOMATICAS["pago"]
-                        elif "contacto" in texto_recibido or "agente" in texto_recibido or "4" == texto_recibido.strip():
-                            respuesta = RESPUESTAS_AUTOMATICAS["contacto"]
+
+                        # 2. Reporte de Fallas Físicas
+                        elif texto == "1" or "falla" in texto or "moneda" in texto or "producto" in texto:
+                            respuesta = (
+                                "🛠️ *Reporte de Falla Técnica*\n\n"
+                                "Lamentamos los inconvenientes. Para procesar tu reembolso o revisión:\n\n"
+                                "1. Indícanos el *Número o Ubicación de la máquina*.\n"
+                                "2. Describe brevemente el fallo (ej. 'Tragó $2.000', 'No cayó selección B3').\n\n"
+                                "Un técnico revisará el historial de la máquina de inmediato."
+                            )
+
+                        # 3. Pagos Electrónicos
+                        elif texto == "2" or "pago" in texto or "nequi" in texto or "qr" in texto:
+                            respuesta = (
+                                "💳 *Soporte de Pagos Electrónicos*\n\n"
+                                "Si realizaste una transferencia y la máquina no despachó:\n\n"
+                                "• Por favor adjunta la *foto o captura del comprobante de pago* por este chat.\n"
+                                "• Incluye el código o número de la máquina.\n\n"
+                                "Validaremos la transacción con el banco para realizar la devolución."
+                            )
+
+                        # 4. Directorio de Máquinas
+                        elif texto == "3" or "maquinas" in texto or "máquinas" in texto:
+                            lista_m = "\n".join([f"• *Máquina {k}*: {v['nombre']} ({v['tipo']})" for k, v in MAQUINAS_SCR.items()])
+                            respuesta = (
+                                f"📍 *Ubicaciones SCR Vending SAS*\n\n{lista_m}\n\n"
+                                "Si reportas un fallo en alguna de ellas, envía el número correspondiente."
+                            )
+
+                        # 5. Transferencia a Asesor
+                        elif texto == "4" or "asesor" in texto or "humano" in texto or "contacto" in texto:
+                            respuesta = (
+                                "👨‍💼 *Atención Personalizada*\n\n"
+                                "Un miembro del equipo de SCR Vending SAS responderá directamente en este chat.\n"
+                                "Horario de atención: Lunes a Sábado de 8:00 AM a 6:00 PM."
+                            )
+
+                        # 6. Respuesta por defecto
                         else:
                             respuesta = (
-                                "Hemos recibido tu mensaje. Si reportas una falla en alguna máquina expendedora, "
-                                "por favor indícanos la ubicación o el número de máquina. Un asesor te responderá a la brevedad."
+                                "Gracias por escribir a *SCR Vending SAS*.\n\n"
+                                "Hemos recibido tu mensaje. Si se trata de una falla, indícanos la ubicación o el número de máquina. "
+                                "Si deseas ver las opciones del menú, escribe *Hola*."
                             )
 
-                        # Enviar la respuesta por WhatsApp
-                        enviar_mensaje_whatsapp(telefono_remitente, respuesta)
+                        # Enviar respuesta automática
+                        enviar_mensaje_whatsapp(telefono, respuesta)
 
     return jsonify({"status": "success"}), 200
 
