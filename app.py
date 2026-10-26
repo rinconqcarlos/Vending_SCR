@@ -21,44 +21,30 @@ VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "mi_token_secreto_vending_123")
 APP_SECRET = os.environ.get("APP_SECRET", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Inicialización del cliente de Gemini API con versión de API v1 explícita para evitar demoras
-ai_client = genai.Client(api_key=GEMINI_API_KEY, http_options={'api_version': 'v1'}) if GEMINI_API_KEY else None
+# Cliente Gemini
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# Conexión a Redis en Upstash (Persistencia real)
+# Conexión a Redis en Upstash (Persistencia)
 redis_url = os.environ.get("UPSTASH_REDIS_REST_URL")
 redis_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 r = Redis(url=redis_url, token=redis_token) if redis_url and redis_token else None
 
-# Pool de hilos para procesamiento asíncrono
 executor = ThreadPoolExecutor(max_workers=5)
-
-# Tiempo de ventana activa: 36 horas en segundos
 WINDOW_36_HOURS_SECONDS = 129600
-
-# Palabras de cortesía/cierre que el bot debe ignorar al finalizar
 GRATITUDE_KEYWORDS = ["gracias", "mil gracias", "ok", "listo", "dale", "perfecto", "bueno", "excelente", "muchas gracias"]
 
-# System Instruction para el Orquestador Empático
 SYSTEM_INSTRUCTION = f"""
-Eres el asistente virtual oficial de "SCR Vending SAS" en Colombia. Tu objetivo es ayudar empáticamente a los clientes a reportar fallas en máquinas expendedoras y recopilar 5 datos obligatorios para su devolución por Nequi.
+Eres el asistente virtual de "SCR Vending SAS" en Colombia. Tu único trabajo es analizar el mensaje del usuario e interpretar qué dato del checklist está entregando o qué respuesta empática dar.
 
-REGLAS DE TONO Y ESTILO:
-1. Muestra empatía genuina: Si el cliente reporta un problema, discúlpate sinceramente por la molestia a nombre de SCR Vending.
-2. Usa emojis adecuados en cada interacción para dar calidez y dinamismo (ej: 🛠️, 📍, 📝, 📸, 💵, 📲, 🙏, ✅), sin exagerar ni saturar.
-3. NUNCA pidas todos los datos al mismo tiempo. Pide ÚNICAMENTE UN DATO A LA VEZ según el orden del checklist.
-4. El orden obligatorio de recolección es:
-   - Paso 1: Código de máquina o Ubicación (Ubicaciones conocidas: {json.dumps(MACHINE_MAP, ensure_ascii=False)}).
-   - Paso 2: Descripción exacta de la falla (¿Qué sucedió? ¿No cayó el producto? ¿Atascado? ¿No dio cambio?).
-   - Paso 3: Foto o evidencia de la máquina/pantalla/producto. Si el cliente indica que no tiene foto, acéptalo amablemente y pasa al siguiente paso.
-   - Paso 4: Monto exacto (\$) a devolver.
-   - Paso 5: Número de Nequi.
-
-5. OBLIGATORIO: Si falta la descripción de la falla (`fault`), NUNCA marques `is_complete` como true. PREGUNTA EXACTAMENTE QUÉ LE SUCEDIÓ A LA MÁQUINA antes de continuar.
-6. Si el cliente ya suministró uno o varios datos en su mensaje (o audio/foto), regístralos en `extracted_data` y pide únicamente el siguiente dato faltante.
-7. NUNCA apruebes devoluciones inmediatas ni prometas tiempos exactos en minutos. Indica que el equipo enviará el comprobante por WhatsApp durante el día.
+CHECKLIST DE CAMPOS:
+- machine: Código o ubicación de la máquina ({json.dumps(MACHINE_MAP, ensure_ascii=False)})
+- fault: Descripción del problema/falla
+- has_photo: boolean (si el usuario dice que envió o adjuntó foto/evidencia)
+- amount: Monto (\$) a devolver
+- nequi: Número de Nequi
 
 ESTRUCTURA DE RESPUESTA REQUERIDA (JSON):
-Retorna EXCLUSIVAMENTE un objeto JSON válido con estas llaves:
+Retorna EXCLUSIVAMENTE un objeto JSON válido:
 {{
   "extracted_data": {{
     "machine": string o null,
@@ -67,8 +53,7 @@ Retorna EXCLUSIVAMENTE un objeto JSON válido con estas llaves:
     "amount": string o null,
     "nequi": string o null
   }},
-  "reply_text": "Texto empático con emojis solicitando ÚNICAMENTE el siguiente dato faltante",
-  "is_complete": boolean
+  "reply_text": "Respuesta breve, empática y con emojis pidiendo el SIGUIENTE dato faltante del checklist"
 }}
 """
 
@@ -139,44 +124,42 @@ def download_media_file(media_id):
         print(f"Error descargando media {media_id}: {e}")
         return None, None
 
-def call_gemini_orchestrator(incoming_text, media_bytes, mime_type, current_checklist):
+def call_gemini_fallback(incoming_text, media_bytes, mime_type, current_checklist):
+    """Se activa únicamente cuando el mensaje es atípico o requiere interpretación."""
     if not ai_client:
         return None
 
     prompt_context = f"""
-    CHECKLIST ACTUAL REGISTRADO EN REDIS:
-    {json.dumps(current_checklist, ensure_ascii=False)}
-
-    MENSAJE ENTRANTE DEL USUARIO:
-    "{incoming_text}"
+    CHECKLIST ACTUAL: {json.dumps(current_checklist, ensure_ascii=False)}
+    MENSAJE ENTRANTE: "{incoming_text}"
     """
-
     contents = [prompt_context]
-
     if media_bytes and mime_type:
         contents.append(types.Part.from_bytes(data=media_bytes, mime_type=mime_type))
 
-    try:
-        response = ai_client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                temperature=0.1
+    # Usamos gemini-1.5-flash nativo
+    for model_id in ["gemini-1.5-flash", "gemini-2.0-flash"]:
+        try:
+            response = ai_client.models.generate_content(
+                model=model_id,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
             )
-        )
-        raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text.replace("```json", "").replace("```", "").strip()
-        return json.loads(raw_text)
-    except Exception as e:
-        print(f"Error en Gemini API v1: {e}")
-        return None
+            raw_text = response.text.strip()
+            if raw_text.startswith("```json"):
+                raw_text = raw_text.replace("```json", "").replace("```", "").strip()
+            return json.loads(raw_text)
+        except Exception as e:
+            print(f"Intento Gemini con {model_id} falló: {e}")
+    return None
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Servidor Bot SCR Vending SAS - Orquestador Veloz Activo", 200
+    return "Servidor Bot SCR Vending SAS - Híbrido Rápido Activo", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -235,10 +218,10 @@ def async_process_webhook(data):
 def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=None):
     text_lower = text.lower()
 
-    # COMANDO DE PRUEBA: Reiniciar sesión manualmente
+    # COMANDO RESET PARA PRUEBAS
     if text_lower == "reset":
         reset_session(phone)
-        send_whatsapp_message(phone, "🔄 *Sesión reiniciada.* Envía cualquier mensaje para iniciar de nuevo.")
+        send_whatsapp_message(phone, "🔄 *Sesión reiniciada con éxito.* Envía cualquier mensaje para iniciar de nuevo.")
         return
 
     session = get_session(phone)
@@ -251,14 +234,14 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
         save_session(phone, session)
         return
 
-    # PALABRAS DE AGRADECIMIENTO
+    # AGRADECIMIENTOS
     if any(kw in text_lower for kw in GRATITUDE_KEYWORDS):
         if session.get("state") in ["WAITING_REFUND", "UNDER_REVIEW", "COMPLETED"]:
             session["state"] = "COMPLETED"
             save_session(phone, session)
             return
 
-    # PALABRAS ADMINISTRATIVAS DIRECTAS
+    # PALABRAS CLAVE ADMINISTRATIVAS
     is_admin_keyword = False
     for kw in BYPASS_BOT_KEYWORDS:
         pattern = r'\b' + re.escape(kw.lower()) + r'\b'
@@ -287,7 +270,7 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
         )
         return
 
-    # --- PASO 0: FILTRO INICIAL OBLIGATORIO (OPCIÓN 1 O 2) ---
+    # --- PASO 0: FILTRO INICIAL DETERMINISTA (MENÚ 1 O 2) ---
     if session.get("state") == "NEW":
         if text == "1":
             session["state"] = "COLLECTING"
@@ -321,78 +304,112 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
             )
             return
 
-    # --- PASO 1 EN ADELANTE: ORQUESTACIÓN CON GEMINI ---
-    current_checklist = session.get("checklist", {
+    # --- PASO 1 EN ADELANTE: FLUJO DETERMINISTA RÁPIDO CON CAÍDA A GEMINI ---
+    checklist = session.get("checklist", {
         "machine": None, "fault": None, "has_photo": False, "amount": None, "nequi": None
     })
 
     if msg_type == "image":
-        current_checklist["has_photo"] = True
+        checklist["has_photo"] = True
 
-    gemini_result = call_gemini_orchestrator(text, media_bytes, mime_type, current_checklist)
+    # 1. Intento por lógica determinista rápida (Respuesta instantánea)
+    if not checklist.get("machine") and text and text != "1":
+        checklist["machine"] = text
+        session["checklist"] = checklist
+        session["state"] = "COLLECTING"
+        save_session(phone, session)
+        send_whatsapp_message(phone, "Ubicación registrada 📍. Cuéntanos por favor, ¿qué le sucedió a la máquina o qué falla presentó? 📝")
+        return
 
-    if gemini_result and isinstance(gemini_result, dict):
-        extracted = gemini_result.get("extracted_data", {})
-        
-        if extracted.get("machine"): current_checklist["machine"] = extracted["machine"]
-        if extracted.get("fault"): current_checklist["fault"] = extracted["fault"]
-        if extracted.get("has_photo"): current_checklist["has_photo"] = True
-        if extracted.get("amount"): current_checklist["amount"] = extracted["amount"]
-        if extracted.get("nequi"): current_checklist["nequi"] = extracted["nequi"]
+    elif checklist.get("machine") and not checklist.get("fault") and text:
+        checklist["fault"] = text
+        session["checklist"] = checklist
+        session["state"] = "COLLECTING"
+        save_session(phone, session)
+        send_whatsapp_message(phone, "Entendido 📝. Si tienes una *foto de la pantalla o del producto atascado*, por favor adjúntala 📸 (si no tienes, escribe 'no tengo').")
+        return
 
-        session["checklist"] = current_checklist
+    elif checklist.get("machine") and checklist.get("fault") and not checklist.get("has_photo"):
+        if msg_type == "image" or "no" in text_lower:
+            if msg_type == "image":
+                checklist["has_photo"] = True
+            session["checklist"] = checklist
+            session["state"] = "COLLECTING"
+            save_session(phone, session)
+            send_whatsapp_message(phone, "Foto/Evidencia anotada 📸. Indícanos el *monto exacto ($)* a devolver 💵.")
+            return
 
-        # Validación estricta: NO se aprueba si falta la descripción de la falla o cualquier otro dato esencial
-        is_complete = gemini_result.get("is_complete", False) and all([
-            current_checklist.get("machine"),
-            current_checklist.get("fault"),
-            current_checklist.get("amount"),
-            current_checklist.get("nequi")
-        ])
+    elif checklist.get("machine") and checklist.get("fault") and not checklist.get("amount") and text:
+        # Extrae números del texto si están presentes
+        amount_match = re.search(r'\b\d[\d\.\,]*\b', text)
+        if amount_match:
+            checklist["amount"] = amount_match.group(0)
+            session["checklist"] = checklist
+            session["state"] = "COLLECTING"
+            save_session(phone, session)
+            send_whatsapp_message(phone, "Monto anotado 💵. Por último, compártenos tu *número de Nequi* para gestionar la devolución 📲.")
+            return
 
-        if is_complete:
+    elif checklist.get("machine") and checklist.get("fault") and checklist.get("amount") and not checklist.get("nequi") and text:
+        nequi_match = re.search(r'\b3\d{9}\b', text)
+        if nequi_match or len(text.strip()) >= 10:
+            checklist["nequi"] = nequi_match.group(0) if nequi_match else text.strip()
+            session["checklist"] = checklist
             session["state"] = "WAITING_REFUND"
             save_session(phone, session)
             send_whatsapp_message(
                 phone,
                 f"✅ *¡Datos registrados exitosamente!*\n\n"
-                f"Hemos tomado nota de tu reporte para la máquina en *{current_checklist.get('machine')}* por un monto de *${current_checklist.get('amount')}* al Nequi *{current_checklist.get('nequi')}*.\n\n"
+                f"Hemos tomado nota de tu reporte para la máquina en *{checklist.get('machine')}* por un monto de *${checklist.get('amount')}* al Nequi *{checklist.get('nequi')}*.\n\n"
                 "📲 Tu solicitud quedó en cola de atención. Tan pronto realicemos la transferencia, te compartiremos el comprobante por este medio. ¡Ofrecemos disculpas por el inconveniente y te deseamos un feliz día! 🙏"
             )
+            return
+
+    # 2. Si el mensaje es complejo, audio o salta la lógica lineal -> Gemini interpreta el mensaje
+    gemini_result = call_gemini_fallback(text, media_bytes, mime_type, checklist)
+
+    if gemini_result and isinstance(gemini_result, dict):
+        extracted = gemini_result.get("extracted_data", {})
+        if extracted.get("machine"): checklist["machine"] = extracted["machine"]
+        if extracted.get("fault"): checklist["fault"] = extracted["fault"]
+        if extracted.get("has_photo"): checklist["has_photo"] = True
+        if extracted.get("amount"): checklist["amount"] = extracted["amount"]
+        if extracted.get("nequi"): checklist["nequi"] = extracted["nequi"]
+
+        session["checklist"] = checklist
+
+        if all([checklist.get("machine"), checklist.get("fault"), checklist.get("amount"), checklist.get("nequi")]):
+            session["state"] = "WAITING_REFUND"
+            save_session(phone, session)
+            send_whatsapp_message(
+                phone,
+                f"✅ *¡Datos registrados exitosamente!*\n\n"
+                f"Hemos tomado nota de tu reporte para la máquina en *{checklist.get('machine')}* por un monto de *${checklist.get('amount')}* al Nequi *{checklist.get('nequi')}*.\n\n"
+                "📲 Tu solicitud quedó en cola de atención. Tan pronto realicemos la transferencia, te compartiremos el comprobante por este medio. ¡Ofrecemos disculpas por el inconveniente y te deseamos un feliz día! 🙏"
+            )
+            return
         else:
             session["state"] = "COLLECTING"
             save_session(phone, session)
             reply_text = gemini_result.get("reply_text")
-            
-            # Fallback seguro guiado paso a paso en orden estricto
-            if not reply_text:
-                if not current_checklist.get("machine"):
-                    reply_text = "Lamentamos los inconvenientes con la máquina 🛠️. Para colaborarte, ¿nos podrías indicar el *código de la máquina* o la *ubicación/conjunto*? 📍"
-                elif not current_checklist.get("fault"):
-                    reply_text = "Ubicación registrada 📍. Cuéntanos por favor, ¿qué le sucedió a la máquina o qué falla presentó? 📝"
-                elif not current_checklist.get("has_photo"):
-                    reply_text = "Entendido 📝. Si tienes una *foto del producto atascado o de la pantalla*, por favor adjúntala 📸 (si no tienes, puedes escribir 'no tengo')."
-                elif not current_checklist.get("amount"):
-                    reply_text = "Indícanos por favor el *monto exacto ($)* retenido a devolver 💵."
-                else:
-                    reply_text = "Por favor compártenos tu *número de Nequi* para gestionar la devolución 📲."
+            if reply_text:
+                send_whatsapp_message(phone, reply_text)
+                return
 
-            send_whatsapp_message(phone, reply_text)
+    # 3. Fallback guiado paso a paso por defecto
+    save_session(phone, session)
+    if not checklist.get("machine"):
+        msg = "Lamentamos los inconvenientes con la máquina 🛠️. Para colaborarte, ¿nos podrías indicar el *código de la máquina* o la *ubicación/conjunto*? 📍"
+    elif not checklist.get("fault"):
+        msg = "Ubicación registrada 📍. Cuéntanos por favor, ¿qué le sucedió a la máquina o qué falla presentó? 📝"
+    elif not checklist.get("has_photo"):
+        msg = "Entendido 📝. Si tienes una *foto de la pantalla o del producto atascado*, por favor adjúntala 📸 (si no tienes, escribe 'no tengo')."
+    elif not checklist.get("amount"):
+        msg = "Indícanos por favor el *monto exacto ($)* retenido a devolver 💵."
     else:
-        # Fallback de respaldo en caso de fallo de red
-        save_session(phone, session)
-        if not current_checklist.get("machine"):
-            msg = "Lamentamos los inconvenientes con la máquina 🛠️. Para colaborarte, ¿nos podrías indicar el *código de la máquina* o la *ubicación/conjunto*? 📍"
-        elif not current_checklist.get("fault"):
-            msg = "Ubicación tomada 📍. Cuéntanos por favor, ¿qué le sucedió a la máquina? 📝"
-        elif not current_checklist.get("has_photo"):
-            msg = "Entendido 📝. Por favor adjúntanos una *foto de la pantalla o del producto* atascado 📸."
-        elif not current_checklist.get("amount"):
-            msg = "Foto registrada 📸. Indícanos el *monto exacto ($)* a devolver 💵."
-        else:
-            msg = "Por favor compártenos tu *número de Nequi* para realizar la devolución 📲."
-        
-        send_whatsapp_message(phone, msg)
+        msg = "Por favor compártenos tu *número de Nequi* para gestionar la devolución 📲."
+
+    send_whatsapp_message(phone, msg)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
