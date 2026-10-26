@@ -150,20 +150,23 @@ def call_gemini_orchestrator(incoming_text, media_bytes, mime_type, current_chec
     if media_bytes and mime_type:
         contents.append(types.Part.from_bytes(data=media_bytes, mime_type=mime_type))
 
-    try:
-        response = ai_client.models.generate_content(
-            model="models/gemini-1.5-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                temperature=0.1
+    # Prueba con gemini-1.5-flash y fallback a gemini-2.5-flash
+    for model_name in ["gemini-1.5-flash", "gemini-2.5-flash"]:
+        try:
+            response = ai_client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
             )
-        )
-        return json.loads(response.text)
-    except Exception as e:
-        print(f"Error detallado en Gemini API: {e}")
-        return None
+            return json.loads(response.text)
+        except Exception as e:
+            print(f"Error intentando con modelo {model_name}: {e}")
+
+    return None
 
 @app.route("/", methods=["GET"])
 def home():
