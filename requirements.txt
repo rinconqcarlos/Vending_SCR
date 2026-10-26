@@ -5,3 +5,4 @@ flask
 requests
 gunicorn
 upstash-redis
+google-genai
