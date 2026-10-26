@@ -152,7 +152,7 @@ def call_gemini_orchestrator(incoming_text, media_bytes, mime_type, current_chec
 
     try:
         response = ai_client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="models/gemini-1.5-flash",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
@@ -167,7 +167,7 @@ def call_gemini_orchestrator(incoming_text, media_bytes, mime_type, current_chec
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Servidor Bot SCR Vending SAS - Clasificación Estricta y Gemini Activos", 200
+    return "Servidor Bot SCR Vending SAS - Gemini Activo", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -229,7 +229,7 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
     current_time = time.time()
     last_interaction = session.get("last_interaction", 0)
 
-    # REGLA DE 36 HORAS: Si ya completó el caso en menos de 36h, no responde nada
+    # REGLA DE 36 HORAS
     time_elapsed = current_time - last_interaction
     if session.get("state") == "COMPLETED" and time_elapsed < WINDOW_36_HOURS_SECONDS:
         save_session(phone, session)
@@ -292,8 +292,6 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
             )
             return
         else:
-            # Si envía cualquier texto (hola, foto, audio, etc.) por primera vez, muestra SIEMPRE las opciones 1 o 2
-            # Si envió foto de entrada, se marca en el checklist para no perdérsela
             if msg_type == "image":
                 session["checklist"]["has_photo"] = True
 
@@ -353,7 +351,7 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
                 reply_text = "Entendido. ¿Nos podrías indicar más detalles de la máquina o el Nequi?"
             send_whatsapp_message(phone, reply_text)
     else:
-        # Fallback guiado paso a paso por defecto
+        # Fallback guiado
         save_session(phone, session)
         if not current_checklist.get("machine"):
             msg = "Lamentamos los inconvenientes con la máquina 🛠️. Para colaborarte, ¿nos podrías indicar el *código de la máquina* o la *ubicación/conjunto*?"
