@@ -38,7 +38,7 @@ WINDOW_36_HOURS_SECONDS = 129600
 # Palabras de cortesía/cierre que el bot debe ignorar al finalizar
 GRATITUDE_KEYWORDS = ["gracias", "mil gracias", "ok", "listo", "dale", "perfecto", "bueno", "excelente", "muchas gracias"]
 
-# System Instruction para el Orquestador Empático Paso a Paso
+# System Instruction para el Orquestador Empático
 SYSTEM_INSTRUCTION = f"""
 Eres el asistente virtual oficial de "SCR Vending SAS" en Colombia. Tu objetivo es ayudar empáticamente a los clientes a reportar fallas en máquinas expendedoras y recopilar 5 datos obligatorios para su devolución por Nequi.
 
@@ -80,11 +80,11 @@ def verify_signature(payload, signature):
 
 def get_session(phone):
     if not r:
-        return {"state": "COLLECTING", "checklist": {"machine": None, "fault": None, "has_photo": False, "amount": None, "nequi": None}, "last_interaction": 0}
+        return {"state": "NEW", "checklist": {"machine": None, "fault": None, "has_photo": False, "amount": None, "nequi": None}, "last_interaction": 0}
     raw = r.get(f"session:{phone}")
     if raw:
         return json.loads(raw)
-    return {"state": "COLLECTING", "checklist": {"machine": None, "fault": None, "has_photo": False, "amount": None, "nequi": None}, "last_interaction": 0}
+    return {"state": "NEW", "checklist": {"machine": None, "fault": None, "has_photo": False, "amount": None, "nequi": None}, "last_interaction": 0}
 
 def save_session(phone, session, ttl=WINDOW_36_HOURS_SECONDS):
     session["last_interaction"] = time.time()
@@ -167,7 +167,7 @@ def call_gemini_orchestrator(incoming_text, media_bytes, mime_type, current_chec
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Servidor Bot SCR Vending SAS - Orquestador Paso a Paso", 200
+    return "Servidor Bot SCR Vending SAS - Clasificación Estricta y Gemini Activos", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -229,7 +229,7 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
     current_time = time.time()
     last_interaction = session.get("last_interaction", 0)
 
-    # REGLA DE 36 HORAS
+    # REGLA DE 36 HORAS: Si ya completó el caso en menos de 36h, no responde nada
     time_elapsed = current_time - last_interaction
     if session.get("state") == "COMPLETED" and time_elapsed < WINDOW_36_HOURS_SECONDS:
         save_session(phone, session)
@@ -242,7 +242,7 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
             save_session(phone, session)
             return
 
-    # PALABRAS ADMINISTRATIVAS
+    # PALABRAS ADMINISTRATIVAS DIRECTAS
     is_admin_keyword = False
     for kw in BYPASS_BOT_KEYWORDS:
         pattern = r'\b' + re.escape(kw.lower()) + r'\b'
@@ -271,7 +271,43 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
         )
         return
 
-    # ORQUESTACIÓN GEMINI API
+    # --- PASO 0: FILTRO INICIAL OBLIGATORIO (OPCIÓN 1 O 2) ---
+    if session.get("state") == "NEW":
+        if text == "1":
+            session["state"] = "COLLECTING"
+            save_session(phone, session)
+            send_whatsapp_message(
+                phone,
+                "Lamentamos mucho el inconveniente presentado con la máquina 🛠️. Vamos a ayudarte a gestionarlo paso a paso.\n\n"
+                "1️⃣ Para empezar, indícanos el *código de la máquina* (el sticker arriba a la derecha, ej: A08, B001) "
+                "o la *ubicación/conjunto* donde te encuentras."
+            )
+            return
+        elif text == "2":
+            session = {"state": "SILENCED_ADMIN", "checklist": {}, "last_interaction": current_time}
+            save_session(phone, session)
+            send_whatsapp_message(
+                phone,
+                "Gracias por comunicarte con el área administrativa de SCR Vending. Tu mensaje ha sido redirigido con el equipo encargado."
+            )
+            return
+        else:
+            # Si envía cualquier texto (hola, foto, audio, etc.) por primera vez, muestra SIEMPRE las opciones 1 o 2
+            # Si envió foto de entrada, se marca en el checklist para no perdérsela
+            if msg_type == "image":
+                session["checklist"]["has_photo"] = True
+
+            save_session(phone, session)
+            send_whatsapp_message(
+                phone,
+                "¡Hola! Bienvenido al canal de atención de *SCR Vending* 🤖\n\n"
+                "Para ayudarte de la mejor manera, por favor selecciona una opción enviando únicamente el número:\n\n"
+                "1️⃣ Tuve un problema con un producto o saldo en una máquina.\n"
+                "2️⃣ Proveedores, facturación o gestión administrativa."
+            )
+            return
+
+    # --- PASO 1 EN ADELANTE: ORQUESTACIÓN CON GEMINI ---
     current_checklist = session.get("checklist", {
         "machine": None, "fault": None, "has_photo": False, "amount": None, "nequi": None
     })
@@ -314,13 +350,13 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
             save_session(phone, session)
             reply_text = gemini_result.get("reply_text")
             if not reply_text:
-                reply_text = "Lamentamos lo sucedido. ¿Nos podrías indicar el código de la máquina o su ubicación?"
+                reply_text = "Entendido. ¿Nos podrías indicar más detalles de la máquina o el Nequi?"
             send_whatsapp_message(phone, reply_text)
     else:
         # Fallback guiado paso a paso por defecto
         save_session(phone, session)
         if not current_checklist.get("machine"):
-            msg = "Lamentamos mucho los inconvenientes con la máquina 🛠️. Para colaborarte con tu reporte, ¿nos podrías indicar el *código de la máquina* o la *ubicación/conjunto*?"
+            msg = "Lamentamos los inconvenientes con la máquina 🛠️. Para colaborarte, ¿nos podrías indicar el *código de la máquina* o la *ubicación/conjunto*?"
         elif not current_checklist.get("fault"):
             msg = "Ubicación tomada 📍. Cuéntanos por favor, ¿qué le sucedió a la máquina?"
         elif not current_checklist.get("has_photo"):
