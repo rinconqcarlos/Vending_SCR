@@ -150,8 +150,8 @@ def call_gemini_orchestrator(incoming_text, media_bytes, mime_type, current_chec
     if media_bytes and mime_type:
         contents.append(types.Part.from_bytes(data=media_bytes, mime_type=mime_type))
 
-    # Lista de modelos válidos vigentes en la API de Google GenAI
-    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+    # Nombres indicados expresamente por la API de Google en los Logs
+    candidate_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 
     for model_name in candidate_models:
         try:
@@ -172,7 +172,7 @@ def call_gemini_orchestrator(incoming_text, media_bytes, mime_type, current_chec
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Servidor Bot SCR Vending SAS - Gemini 2.0 Activo", 200
+    return "Servidor Bot SCR Vending SAS - Gemini Activo", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -356,7 +356,7 @@ def process_user_interaction(phone, text, msg_type, media_bytes=None, mime_type=
                 reply_text = "Entendido. ¿Nos podrías indicar más detalles de la máquina o el Nequi?"
             send_whatsapp_message(phone, reply_text)
     else:
-        # Fallback guiado si falla la API
+        # Fallback guiado
         save_session(phone, session)
         if not current_checklist.get("machine"):
             msg = "Lamentamos los inconvenientes con la máquina 🛠️. Para colaborarte, ¿nos podrías indicar el *código de la máquina* o la *ubicación/conjunto*?"
