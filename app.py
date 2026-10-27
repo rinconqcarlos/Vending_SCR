@@ -48,6 +48,8 @@ MAX_FAILED_ATTEMPTS = 2          # fallos por dato antes de dejar el reporte INC
 SESSION_TTL = 129600             # 36 horas
 ADMIN_TTL = 2592000              # 30 días
 REPROMPT_COOLDOWN = 1800         # 30 min entre preguntas "mismo/nuevo"
+# Si el equipo escribe SOLO esta palabra desde el celular, el bot se apaga para siempre en ese chat.
+SILENCE_COMMAND = os.environ.get("SILENCE_COMMAND", "proveedor").strip().lower()
 
 ai_client = (
     genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1"})
@@ -127,7 +129,12 @@ def get_session(phone):
 
 def save_session(phone, session):
     session["last_interaction"] = time.time()
-    ttl = ADMIN_TTL if session.get("state") == "SILENCED_ADMIN" else SESSION_TTL
+    if session.get("silenced_forever"):
+        ttl = None  # sin vencimiento
+    elif session.get("state") == "SILENCED_ADMIN":
+        ttl = ADMIN_TTL
+    else:
+        ttl = SESSION_TTL
     kv_set(f"session:{phone}", json.dumps(session), ex=ttl)
 
 
@@ -646,12 +653,16 @@ def _process(phone, text, msg_type, media_bytes, mime_type, button_id):
     text = (text or "").strip()
     tl = text.lower()
 
+    session = get_session(phone)
+
+    # Chat silenciado para siempre por el equipo: el bot no responde a nada.
+    if session.get("silenced_forever"):
+        return
+
     if tl == "reset":
         kv_del(f"session:{phone}")
         send_text(phone, "🔄 *Sesión reiniciada.* Envía cualquier mensaje para iniciar de nuevo.")
         return
-
-    session = get_session(phone)
 
     # Un humano respondió desde el celular: el bot se calla un rato.
     if session.get("human_until", 0) > time.time():
@@ -696,8 +707,18 @@ def handle_echo(echo):
     customer = echo.get("to")
     if not customer:
         return
+    # ¿El equipo escribió únicamente la palabra de silencio? (ej: "proveedor")
+    body = (echo.get("text") or {}).get("body", "") if isinstance(echo.get("text"), dict) else ""
+    typed = " ".join(re.findall(r"\w+", body.lower()))
+
     with phone_lock(customer):
         session = get_session(customer)
+        if typed == SILENCE_COMMAND:
+            session["silenced_forever"] = True
+            session["state"] = "SILENCED_ADMIN"
+            save_session(customer, session)
+            print(f"🔕 Bot desactivado para siempre en el chat de {customer}")
+            return
         session["human_until"] = time.time() + HUMAN_PAUSE_SECONDS
         save_session(customer, session)
     print(f"👤 Humano atendiendo a {customer}: bot en pausa {HUMAN_PAUSE_SECONDS // 3600} h")
